@@ -4,8 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
-import 'package:device_apps/device_apps.dart';
 import 'package:image/image.dart' as img;
+import 'package:url_launcher/url_launcher.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -21,6 +21,7 @@ class _HomePageState extends State<HomePage> {
   late Interpreter _interpreter;
   late List<String> _labels;
   final int _inputSize = 224;
+  bool _modelReady = false;
 
   @override
   void initState() {
@@ -36,26 +37,38 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _loadModel() async {
     try {
-      _interpreter = await Interpreter.fromAsset(
-        'assets/models/bestModel.tflite',
-      );
+      _interpreter = await Interpreter.fromAsset('assets/models/model.tflite');
 
       final labelsData = await rootBundle.loadString(
         'assets/models/labels.txt',
       );
       _labels =
-          labelsData.split('\n').where((label) => label.isNotEmpty).toList();
+          labelsData
+              .split('\n')
+              .map((label) => label.trim())
+              .where((label) => label.isNotEmpty)
+              // Add this line to split by space and get the name
+              .map((label) => label.substring(label.indexOf(' ') + 1))
+              .toList();
 
+      setState(() {
+        _modelReady = true;
+      });
       print("Model and labels loaded!");
-      print("Loaded labels: $_labels");
-      print("Number of labels: ${_labels.length}");
     } catch (e) {
       print("Failed to load model: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to load model: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
   Future<List<double>> _processImageForInference(File imageFile) async {
-    // Read the image as bytes and decode
     final bytes = await imageFile.readAsBytes();
     img.Image? image = img.decodeImage(bytes);
 
@@ -72,22 +85,21 @@ class _HomePageState extends State<HomePage> {
   Float32List _imageToByteListFloat32(img.Image image) {
     final int size = _inputSize;
     var convertedBytes = Float32List(1 * size * size * 3);
-    var buffer = Float32List.view(convertedBytes.buffer);
     int pixelIndex = 0;
 
     for (var i = 0; i < size; i++) {
       for (var j = 0; j < size; j++) {
         final pixel = image.getPixel(j, i);
-        num r = pixel.r;
-        num g = pixel.g;
-        num b = pixel.b;
+        final r = img.getRed(pixel);
+        final g = img.getGreen(pixel);
+        final b = img.getBlue(pixel);
 
-        buffer[pixelIndex++] = (r - 128) / 128.0;
-        buffer[pixelIndex++] = (g - 128) / 128.0;
-        buffer[pixelIndex++] = (b - 128) / 128.0;
+        convertedBytes[pixelIndex++] = (r - 127.5) / 127.5;
+        convertedBytes[pixelIndex++] = (g - 127.5) / 127.5;
+        convertedBytes[pixelIndex++] = (b - 127.5) / 127.5;
       }
     }
-    return convertedBytes.buffer.asFloat32List();
+    return convertedBytes;
   }
 
   Future<void> _predictImage(File image) async {
@@ -96,12 +108,7 @@ class _HomePageState extends State<HomePage> {
     try {
       final inputData = await _processImageForInference(image);
 
-      var inputShape = [
-        1,
-        _inputSize,
-        _inputSize,
-        3,
-      ];
+      var inputShape = [1, _inputSize, _inputSize, 3];
 
       var outputShape = _interpreter.getOutputTensor(0).shape;
       var outputType = _interpreter.getOutputTensor(0).type;
@@ -115,6 +122,8 @@ class _HomePageState extends State<HomePage> {
 
       print("Input shape: $inputShape");
       print("Input data sample: ${inputData.take(10).toList()}");
+      print("Input tensor shape: ${_interpreter.getInputTensor(0).shape}");
+      print("Input tensor type: ${_interpreter.getInputTensor(0).type}");
 
       _interpreter.run(
         Float32List.fromList(inputData).buffer,
@@ -175,21 +184,24 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  void _launchApp(String className) async {
-    // ye bhi ek baar dekh liyo warna isme asa krr sakte hai ki
-    // user ko choice dede ki konsa device hai or hum kuch krke pata
-    // laga le ki konse device mai app chal rha hai ye dekh lena warna mai krr dunga
-    final Map<String, String> packageNames = {
-      'calculator': 'com.miui.calculator',
-      'clock': 'com.google.android.deskclock',
-      'maps': 'com.google.android.apps.maps',
-    };
-    final packageName = packageNames[className.toLowerCase()];
-    if (packageName != null && await DeviceApps.isAppInstalled(packageName)) {
-      DeviceApps.openApp(packageName);
+  // Replace _launchApp with this:
+  void _launchPredictedUrl() async {
+    String? url;
+    if (_predictedClass == 'calculator') {
+      url =
+          "https://play.google.com/store/apps/details?id=com.google.android.calculator";
+    } else if (_predictedClass == 'clock') {
+      url =
+          "https://play.google.com/store/apps/details?id=com.google.android.deskclock";
+    } else if (_predictedClass == 'maps') {
+      url =
+          "https://play.google.com/store/apps/details?id=com.google.android.apps.maps";
+    }
+    if (url != null && url.isNotEmpty && await canLaunchUrl(Uri.parse(url))) {
+      await launchUrl(Uri.parse(url));
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('App not found or configured: $className')),
+        SnackBar(content: Text('No valid URL provided for $_predictedClass')),
       );
     }
   }
@@ -302,7 +314,7 @@ class _HomePageState extends State<HomePage> {
                             borderRadius: BorderRadius.circular(16),
                           ),
                         ),
-                        onPressed: () => _launchApp(_predictedClass!),
+                        onPressed: _launchPredictedUrl,
                       ),
                     ],
                   ],
@@ -377,7 +389,7 @@ class _HomePageState extends State<HomePage> {
         ElevatedButton.icon(
           icon: const Icon(Icons.photo_library_outlined),
           label: const Text('Select'),
-          onPressed: _pickImage,
+          onPressed: _modelReady ? _pickImage : null,
         ),
         if (_selectedImage != null)
           TextButton.icon(
